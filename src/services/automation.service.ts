@@ -1,31 +1,22 @@
 import { screenCaptureService } from './screenCapture.service';
-import { geminiService } from './gemini.service';
+import { tradingAnalysisService, type TradingAnalysis } from './tradingAnalysis.service';
 import { speechService } from './speech.service';
-import type { AnalysisResult } from './gemini.service';
 
 export interface AutomationConfig {
   enabled: boolean;
-  targetSecond: number;
-  assets: string[];
-  minConfidence: number;
+  intervalSeconds: number;
   voiceEnabled: boolean;
-  alertOnlyHighConfidence: boolean;
 }
 
 class AutomationService {
   private config: AutomationConfig = {
     enabled: false,
-    targetSecond: 57,
-    assets: ['EURUSD'],
-    minConfidence: 60,
+    intervalSeconds: 15,
     voiceEnabled: true,
-    alertOnlyHighConfidence: true,
   };
 
   private intervalId: ReturnType<typeof setInterval> | null = null;
-  private lastAnalysis: AnalysisResult | null = null;
-  private analysisHistory: AnalysisResult[] = [];
-  private onAnalysisCallback: ((result: AnalysisResult) => void) | null = null;
+  private onAnalysisCallback: ((result: TradingAnalysis) => void) | null = null;
 
   configure(config: Partial<AutomationConfig>) {
     this.config = { ...this.config, ...config };
@@ -35,8 +26,9 @@ class AutomationService {
     return { ...this.config };
   }
 
-  onAnalysis(callback: (result: AnalysisResult) => void) {
+  onAnalysis(callback: (result: TradingAnalysis) => void) {
     this.onAnalysisCallback = callback;
+    tradingAnalysisService.onAnalysis(callback);
   }
 
   async start(): Promise<void> {
@@ -45,90 +37,48 @@ class AutomationService {
       return;
     }
 
-    if (!geminiService.isInitialized()) {
-      throw new Error('Gemini AI não está configurado. Configure a API Key primeiro.');
-    }
-
     if (!screenCaptureService.isCapturing()) {
       throw new Error('Captura de tela não foi iniciada. Inicie a captura primeiro.');
     }
 
     this.config.enabled = true;
-    console.log('🤖 Automação iniciada - Aguardando segundo', this.config.targetSecond);
+    console.log('🤖 Automação iniciada - Intervalo:', this.config.intervalSeconds, 's');
+
+    // Primeira análise imediata
+    this.performAnalysis();
 
     this.intervalId = setInterval(() => {
-      this.checkAndAnalyze();
-    }, 1000);
+      this.performAnalysis();
+    }, this.config.intervalSeconds * 1000);
 
-    speechService.speakQuick('Robô ativado e pronto para operar');
-  }
-
-  private async checkAndAnalyze() {
-    const currentSecond = new Date().getSeconds();
-
-    if (currentSecond === this.config.targetSecond) {
-      try {
-        await this.performAnalysis();
-      } catch (error) {
-        console.error('❌ Erro na análise automática:', error);
-      }
+    if (this.config.voiceEnabled) {
+      speechService.speakQuick('Rastreamento de volume e força ativado');
     }
   }
 
   private async performAnalysis() {
-    console.log(`⏰ Segundo ${this.config.targetSecond} - Capturando e analisando...`);
+    if (tradingAnalysisService.isAnalyzing()) return;
 
     try {
       const frame = screenCaptureService.captureFrame();
-      const asset = this.config.assets[0] || 'DESCONHECIDO';
-      const analysis = await geminiService.analyzeCandle(frame, asset);
+      const analysis = await tradingAnalysisService.analyze(frame);
 
-      this.lastAnalysis = analysis;
-      this.analysisHistory.unshift(analysis);
-
-      if (this.analysisHistory.length > 50) {
-        this.analysisHistory.pop();
-      }
-
-      if (this.onAnalysisCallback) {
-        this.onAnalysisCallback(analysis);
-      }
-
-      if (this.shouldAlert(analysis)) {
-        if (analysis.confidence >= 80) {
-          speechService.playAlert();
-        }
-
-        if (this.config.voiceEnabled) {
-          speechService.speak(analysis);
-        }
+      if (this.config.voiceEnabled && analysis.intensidade === 'FORTE') {
+        speechService.playAlert();
+        speechService.speakQuick(
+          `Força ${analysis.direcao === 'COMPRA' ? 'compradora' : 'vendedora'} forte detectada. ${analysis.resumo}`
+        );
       }
 
       console.log('✅ Análise concluída:', {
-        signal: analysis.signal,
-        confidence: analysis.confidence,
-        pattern: analysis.candlePattern
+        direcao: analysis.direcao,
+        intensidade: analysis.intensidade,
+        forca_compradora: analysis.forca_compradora,
+        forca_vendedora: analysis.forca_vendedora,
       });
-
     } catch (error: any) {
       console.error('❌ Falha na análise:', error);
-
-      if (this.config.voiceEnabled) {
-        speechService.speakQuick('Erro na análise. Verifique a captura.');
-      }
     }
-  }
-
-  private shouldAlert(analysis: AnalysisResult): boolean {
-    if (analysis.signal === 'NEUTRO') {
-      return false;
-    }
-
-    if (this.config.alertOnlyHighConfidence) {
-      return analysis.confidence >= 75;
-    }
-
-    return analysis.confidence >= this.config.minConfidence;
   }
 
   stop() {
@@ -139,60 +89,26 @@ class AutomationService {
 
     this.config.enabled = false;
     console.log('🛑 Automação parada');
-    speechService.speakQuick('Robô desativado');
+    if (this.config.voiceEnabled) {
+      speechService.speakQuick('Rastreamento desativado');
+    }
   }
 
   isRunning(): boolean {
     return this.config.enabled;
   }
 
-  getLastAnalysis(): AnalysisResult | null {
-    return this.lastAnalysis;
+  getLastAnalysis(): TradingAnalysis | null {
+    return tradingAnalysisService.getLastAnalysis();
   }
 
-  getHistory(): AnalysisResult[] {
-    return [...this.analysisHistory];
+  getHistory(): TradingAnalysis[] {
+    return tradingAnalysisService.getHistory();
   }
 
-  clearHistory() {
-    this.analysisHistory = [];
-    this.lastAnalysis = null;
-  }
-
-  async analyzeNow(): Promise<AnalysisResult> {
-    console.log('🔍 Análise manual solicitada');
-
+  async analyzeNow(): Promise<TradingAnalysis> {
     const frame = screenCaptureService.captureFrame();
-    const asset = this.config.assets[0] || 'DESCONHECIDO';
-    const analysis = await geminiService.analyzeCandle(frame, asset);
-
-    this.lastAnalysis = analysis;
-    this.analysisHistory.unshift(analysis);
-
-    if (this.onAnalysisCallback) {
-      this.onAnalysisCallback(analysis);
-    }
-
-    return analysis;
-  }
-
-  getStats() {
-    const total = this.analysisHistory.length;
-    const buy = this.analysisHistory.filter(a => a.signal === 'COMPRA').length;
-    const sell = this.analysisHistory.filter(a => a.signal === 'VENDA').length;
-    const neutral = this.analysisHistory.filter(a => a.signal === 'NEUTRO').length;
-    const avgConfidence = total > 0
-      ? this.analysisHistory.reduce((acc, a) => acc + a.confidence, 0) / total
-      : 0;
-
-    return {
-      total,
-      buy,
-      sell,
-      neutral,
-      avgConfidence: Math.round(avgConfidence),
-      highConfidenceSignals: this.analysisHistory.filter(a => a.confidence >= 80).length,
-    };
+    return tradingAnalysisService.analyze(frame);
   }
 }
 
